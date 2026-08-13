@@ -213,8 +213,9 @@ pub(crate) fn unlisten_js_script(
   format!(
     "(function () {{
         const listeners = (window['{listeners_object_name}'] || {{}})[{event_arg}]
-        if (listeners) {{
-          window.__TAURI_INTERNALS__.unregisterCallback(listeners[{event_id_arg}].handlerId)
+        const listener = listeners && listeners[{event_id_arg}]
+        if (listener) {{
+          window.__TAURI_INTERNALS__.unregisterCallback(listener.handlerId)
         }}
       }})()
     ",
@@ -248,5 +249,22 @@ mod tests {
       .unwrap_err()
       .to_string();
     assert_eq!("only alphanumeric, '-', '/', ':', '_' permitted for event names: \"some\\r illegal event name\"", s);
+  }
+
+  #[test]
+  fn unlisten_script_guards_missing_listener_entry() {
+    let script = unlisten_js_script("__TAURI_EVENT_LISTENERS__", "'event'", "eventId");
+    assert!(
+      script.contains("listeners && listeners[eventId]"),
+      "must guard both the listeners map and the entry"
+    );
+    assert!(
+      script.contains("if (listener)"),
+      "must not call unregisterCallback when the entry is absent"
+    );
+    assert!(
+      !script.contains("listeners[eventId].handlerId"),
+      "must not access handlerId on an undefined entry"
+    );
   }
 }
