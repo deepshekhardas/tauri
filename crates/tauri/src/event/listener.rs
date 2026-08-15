@@ -24,7 +24,10 @@ enum Pending {
     event: crate::EventName,
     handler: Handler,
   },
-  Emit(EmitArgs),
+  Emit {
+    args: EmitArgs,
+    filter: Option<Box<dyn Fn(&EventTarget) -> bool + Send>>,
+  },
   RemoveForTarget(EventTarget),
 }
 
@@ -128,7 +131,7 @@ impl Listeners {
       match action {
         Pending::Unlisten(id) => self.unlisten(id),
         Pending::Listen { id, event, handler } => self.listen_with_id(id, event, handler),
-        Pending::Emit(args) => self.emit(args)?,
+        Pending::Emit { args, filter } => self.emit_filter(args, filter)?,
         Pending::RemoveForTarget(target) => self.remove_listeners_for_target(target),
       }
     }
@@ -207,12 +210,15 @@ impl Listeners {
   /// Emits the given event with its payload based on a filter.
   pub(crate) fn emit_filter<F>(&self, emit_args: EmitArgs, filter: Option<F>) -> crate::Result<()>
   where
-    F: Fn(&EventTarget) -> bool,
+    F: Fn(&EventTarget) -> bool + Send + 'static,
   {
     let mut maybe_pending = false;
 
     match self.inner.handlers.try_lock() {
-      Err(_) => self.insert_pending(Pending::Emit(emit_args)),
+      Err(_) => self.insert_pending(Pending::Emit {
+        args: emit_args,
+        filter: filter.map(Box::new),
+      }),
       Ok(lock) => {
         if let Some(handlers) = lock.get(&emit_args.event) {
           let handlers = handlers.iter();
@@ -234,7 +240,7 @@ impl Listeners {
 
   /// Emits the given event with its payload.
   pub(crate) fn emit(&self, emit_args: EmitArgs) -> crate::Result<()> {
-    self.emit_filter(emit_args, None::<&dyn Fn(&EventTarget) -> bool>)
+    self.emit_filter(emit_args, None::<fn(&EventTarget) -> bool>)
   }
 
   pub(crate) fn listen_js(
@@ -421,6 +427,44 @@ mod test {
       // assert that the key is contained in the listeners map
       assert!(l.contains_key(&key));
     }
+  }
+
+  #[test]
+  fn emit_filter_respects_filter_when_pending() {
+    use std::sync::atomic::AtomicUsize;
+
+    let listeners = Listeners::default();
+    let event = crate::EventName::new("test-event".to_owned()).unwrap();
+
+    let main_calls = Arc::new(AtomicUsize::new(0));
+    let other_calls = Arc::new(AtomicUsize::new(0));
+
+    let main_calls_clone = main_calls.clone();
+    listeners.listen(event.clone(), EventTarget::window("main"), move |_| {
+      main_calls_clone.fetch_add(1, Ordering::Relaxed);
+    });
+    let other_calls_clone = other_calls.clone();
+    listeners.listen(event.clone(), EventTarget::webview_window("other"), move |_| {
+      other_calls_clone.fetch_add(1, Ordering::Relaxed);
+    });
+
+    // hold the handlers lock so the filtered emit is queued as pending
+    let lock = listeners.inner.handlers.lock().unwrap();
+    let emit = listeners.emit_filter(
+      EmitArgs::new(event.as_str_event(), &()).unwrap(),
+      Some(|target| matches!(target, EventTarget::Window { label } if label == "main")),
+    );
+    assert!(emit.is_ok());
+    drop(lock);
+
+    // a subsequent emit acquires the lock and flushes the pending filtered emit
+    listeners
+      .emit(EmitArgs::new(event.as_str_event(), &()).unwrap())
+      .unwrap();
+
+    // only the matching listener received the pending filtered emit
+    assert_eq!(main_calls.load(Ordering::Relaxed), 2);
+    assert_eq!(other_calls.load(Ordering::Relaxed), 1);
   }
 
   #[test]
