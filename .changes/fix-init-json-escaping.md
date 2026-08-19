@@ -1,0 +1,1 @@
+Fix `tauri init` panicking when prompts contain double quotes or backslashes by JSON-escaping the values interpolated into the `tauri.conf.json` template.

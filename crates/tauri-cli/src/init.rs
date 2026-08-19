@@ -187,6 +187,22 @@ fn default_build_command(pm: PackageManager) -> &'static str {
   }
 }
 
+fn to_json_string(value: &str) -> handlebars::Json {
+  handlebars::Json::String(
+    serde_json::to_string(value)
+      .expect("failed to serialize string")
+      .trim_matches('"')
+      .to_string(),
+  )
+}
+
+fn to_json_optional_string(value: Option<&str>) -> handlebars::Json {
+  match value {
+    Some(value) => to_json_string(value),
+    None => handlebars::Json::Null,
+  }
+}
+
 pub fn command(mut options: Options) -> Result<()> {
   options = options.load()?;
 
@@ -243,21 +259,24 @@ pub fn command(mut options: Options) -> Result<()> {
     data.insert("tauri_plugin_dep", to_json(tauri_plugin_dep));
     data.insert(
       "frontend_dist",
-      to_json(options.frontend_dist.as_deref().unwrap_or("../dist")),
+      to_json_string(options.frontend_dist.as_deref().unwrap_or("../dist")),
     );
-    data.insert("dev_url", to_json(options.dev_url));
+    data.insert("dev_url", to_json_optional_string(options.dev_url.as_deref()));
     data.insert(
       "app_name",
-      to_json(options.app_name.as_deref().unwrap_or("Tauri App")),
+      to_json_string(options.app_name.as_deref().unwrap_or("Tauri App")),
     );
     data.insert(
       "window_title",
-      to_json(options.window_title.as_deref().unwrap_or("Tauri")),
+      to_json_string(options.window_title.as_deref().unwrap_or("Tauri")),
     );
-    data.insert("before_dev_command", to_json(options.before_dev_command));
+    data.insert(
+      "before_dev_command",
+      to_json_optional_string(options.before_dev_command.as_deref()),
+    );
     data.insert(
       "before_build_command",
-      to_json(options.before_build_command),
+      to_json_optional_string(options.before_build_command.as_deref()),
     );
 
     let mut config = serde_json::from_str(
@@ -320,4 +339,67 @@ pub fn command(mut options: Options) -> Result<()> {
   }
 
   Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn json_string_escapes_special_characters() {
+    assert_eq!(to_json_string("Tauri"), handlebars::Json::String("Tauri".into()));
+    assert_eq!(
+      to_json_string("\"Tauri Bug\""),
+      handlebars::Json::String("\\\"Tauri Bug\\\"".into())
+    );
+    assert_eq!(
+      to_json_string("back\\slash"),
+      handlebars::Json::String("back\\\\slash".into())
+    );
+    assert_eq!(
+      to_json_string("line\nbreak"),
+      handlebars::Json::String("line\\nbreak".into())
+    );
+  }
+
+  #[test]
+  fn json_optional_string_maps_none_to_null() {
+    assert_eq!(
+      to_json_optional_string(None),
+      handlebars::Json::Null
+    );
+    assert_eq!(
+      to_json_optional_string(Some("dev")),
+      handlebars::Json::String("dev".into())
+    );
+  }
+
+  #[test]
+  fn renders_valid_config_with_special_characters() {
+    let mut handlebars = Handlebars::new();
+    handlebars.register_escape_fn(handlebars::no_escape);
+    let mut data = BTreeMap::new();
+    data.insert("app_name", to_json_string("Tauri App"));
+    data.insert("window_title", to_json_string("\"Tauri Bug\""));
+    data.insert("frontend_dist", to_json_string("../dist"));
+    data.insert("dev_url", to_json_optional_string(Some("http://localhost:5173")));
+    data.insert(
+      "before_dev_command",
+      to_json_optional_string(None),
+    );
+    data.insert(
+      "before_build_command",
+      to_json_optional_string(None),
+    );
+
+    let rendered = handlebars
+      .render_template(TAURI_CONF_TEMPLATE, &data)
+      .expect("failed to render template");
+    let config: serde_json::Value =
+      serde_json::from_str(&rendered).expect("rendered template is not valid JSON");
+    assert_eq!(config["app"]["windows"][0]["title"], "\"Tauri Bug\"");
+    assert_eq!(config["productName"], "Tauri App");
+    assert_eq!(config["build"]["frontendDist"], "../dist");
+    assert_eq!(config["build"]["devUrl"], "http://localhost:5173");
+  }
 }
